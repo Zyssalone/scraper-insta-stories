@@ -36,7 +36,11 @@ def init_session():
         return
     if not IG_USERNAME or not IG_SESSION_COOKIE:
         raise RuntimeError("IG_USERNAME and IG_SESSION_COOKIE must be set")
-    L.context._session.cookies.set("sessionid", IG_SESSION_COOKIE, domain=".instagram.com")
+    for pair in IG_SESSION_COOKIE.split(";"):
+        pair = pair.strip()
+        if "=" in pair:
+            name, _, value = pair.partition("=")
+            L.context._session.cookies.set(name.strip(), value.strip(), domain=".instagram.com")
     L.context.username = IG_USERNAME
     session_initialized = True
 
