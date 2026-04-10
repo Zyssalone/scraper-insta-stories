@@ -27,11 +27,18 @@ L = instaloader.Instaloader(
 )
 
 
+session_initialized = False
+
+
 def init_session():
+    global session_initialized
+    if session_initialized:
+        return
     if not IG_USERNAME or not IG_SESSION_COOKIE:
         raise RuntimeError("IG_USERNAME and IG_SESSION_COOKIE must be set")
     L.context._session.cookies.set("sessionid", IG_SESSION_COOKIE, domain=".instagram.com")
     L.context.username = IG_USERNAME
+    session_initialized = True
 
 
 def verify_api_key(key: str = Security(api_key_header)):
@@ -40,18 +47,15 @@ def verify_api_key(key: str = Security(api_key_header)):
     return key
 
 
-@app.on_event("startup")
-def startup():
-    init_session()
-
-
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    init_session()
+    return {"status": "ok", "user": IG_USERNAME}
 
 
 @app.get("/stories/{username}")
 def get_stories(username: str, _: str = Security(verify_api_key)):
+    init_session()
     try:
         profile = instaloader.Profile.from_username(L.context, username)
         stories = []
