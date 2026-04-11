@@ -1,11 +1,13 @@
 import os
 import json
+import asyncio
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, Security
 from fastapi.responses import StreamingResponse
 from fastapi.security.api_key import APIKeyHeader
 from dotenv import load_dotenv
 from scheduler import start_scheduler
+from scraper import run_scraper
 
 load_dotenv()
 
@@ -26,9 +28,10 @@ def verify_api_key(key: str = Security(api_key_header)):
 
 
 @app.on_event("startup")
-def startup():
+async def startup():
     MEDIA_DIR.mkdir(parents=True, exist_ok=True)
     start_scheduler()
+    asyncio.create_task(run_scraper())
 
 
 @app.get("/health")
@@ -100,7 +103,5 @@ def stream_media(department: str, filename: str, _: str = Security(verify_api_ke
 
 @app.post("/scrape")
 async def trigger_scrape(_: str = Security(verify_api_key)):
-    from scraper import run_scraper
-    import asyncio
     asyncio.create_task(run_scraper())
     return {"status": "scrape started"}
