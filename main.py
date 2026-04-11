@@ -1,48 +1,22 @@
 import os
 import json
-import instaloader
+from pathlib import Path
 from fastapi import FastAPI, HTTPException, Security
+from fastapi.responses import StreamingResponse
 from fastapi.security.api_key import APIKeyHeader
 from dotenv import load_dotenv
+from scheduler import start_scheduler
 
 load_dotenv()
 
 app = FastAPI()
 
-IG_USERNAME = os.getenv("IG_USERNAME")
-IG_SESSION_COOKIE = os.getenv("IG_SESSION_COOKIE")
+MEDIA_DIR = Path(os.getenv("MEDIA_DIR", "./media"))
 API_KEY = os.getenv("API_KEY")
 
 api_key_header = APIKeyHeader(name="x-api-key", auto_error=True)
 
-L = instaloader.Instaloader(
-    download_pictures=False,
-    download_videos=False,
-    download_video_thumbnails=False,
-    download_geotags=False,
-    download_comments=False,
-    save_metadata=False,
-    compress_json=False,
-    quiet=True,
-)
-
-
-session_initialized = False
-
-
-def init_session():
-    global session_initialized
-    if session_initialized:
-        return
-    if not IG_USERNAME or not IG_SESSION_COOKIE:
-        raise RuntimeError("IG_USERNAME and IG_SESSION_COOKIE must be set")
-    for pair in IG_SESSION_COOKIE.split(";"):
-        pair = pair.strip()
-        if "=" in pair:
-            name, _, value = pair.partition("=")
-            L.context._session.cookies.set(name.strip(), value.strip(), domain=".instagram.com")
-    L.context.username = IG_USERNAME
-    session_initialized = True
+CHUNK_SIZE = 1024 * 512
 
 
 def verify_api_key(key: str = Security(api_key_header)):
@@ -51,33 +25,82 @@ def verify_api_key(key: str = Security(api_key_header)):
     return key
 
 
+@app.on_event("startup")
+def startup():
+    MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+    start_scheduler()
+
+
 @app.get("/health")
 def health():
-    init_session()
-    return {"status": "ok", "user": IG_USERNAME}
+    return {"status": "ok", "user": os.getenv("IG_USERNAME")}
 
 
-@app.get("/stories/{username}")
-def get_stories(username: str, _: str = Security(verify_api_key)):
-    init_session()
-    try:
-        profile = instaloader.Profile.from_username(L.context, username)
-        stories = []
+@app.get("/stories")
+def get_all_stories(_: str = Security(verify_api_key)):
+    result = []
 
-        for story in L.get_stories(userids=[profile.userid]):
-            for item in story.get_items():
-                stories.append({
-                    "id": str(item.mediaid),
-                    "mediaType": "video" if item.is_video else "image",
-                    "mediaUrl": item.url,
-                    "timestamp": int(item.date_utc.timestamp()),
-                })
+    for dept_dir in sorted(MEDIA_DIR.iterdir()):
+        if not dept_dir.is_dir():
+            continue
 
-        return {"username": username, "stories": stories}
+        metadata_path = dept_dir / "stories.json"
+        if not metadata_path.exists():
+            continue
 
-    except instaloader.exceptions.ProfileNotExistsException:
-        raise HTTPException(status_code=404, detail=f"Profile {username} not found")
-    except instaloader.exceptions.LoginRequiredException:
-        raise HTTPException(status_code=401, detail="Instagram session expired")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        stories = json.loads(metadata_path.read_text())
+        result.append({
+            "department": dept_dir.name,
+            "stories": stories,
+        })
+
+    return result
+
+
+@app.get("/stories/{department}")
+def get_department_stories(department: str, _: str = Security(verify_api_key)):
+    dept_dir = MEDIA_DIR / department.upper()
+    metadata_path = dept_dir / "stories.json"
+
+    if not metadata_path.exists():
+        return {"department": department, "stories": []}
+
+    stories = json.loads(metadata_path.read_text())
+    return {"department": department, "stories": stories}
+
+
+@app.get("/media/{department}/{filename}")
+def stream_media(department: str, filename: str, _: str = Security(verify_api_key)):
+    file_path = MEDIA_DIR / department.upper() / filename
+
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    ext = file_path.suffix.lower()
+    if ext == ".mp4":
+        media_type = "video/mp4"
+    elif ext in (".jpg", ".jpeg"):
+        media_type = "image/jpeg"
+    elif ext == ".png":
+        media_type = "image/png"
+    else:
+        media_type = "application/octet-stream"
+
+    def iter_file():
+        with open(file_path, "rb") as f:
+            while chunk := f.read(CHUNK_SIZE):
+                yield chunk
+
+    return StreamingResponse(
+        iter_file(),
+        media_type=media_type,
+        headers={"Content-Length": str(file_path.stat().st_size)},
+    )
+
+
+@app.post("/scrape")
+async def trigger_scrape(_: str = Security(verify_api_key)):
+    from scraper import run_scraper
+    import asyncio
+    asyncio.create_task(run_scraper())
+    return {"status": "scrape started"}
